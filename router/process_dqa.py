@@ -28,14 +28,15 @@ INDICATOR_QUERIES = {
 # API endpoint to handle RabbitMQ messages
 async def process_message(message: RabbitMQMessage, db_source: Session = Depends(get_db_source),
                           db_dest: Session = Depends(get_db_dest)):
+    # DQA for Care and treatment docket
+    if message.Docket in ['NDWH']:
+        # Iterate over the indicators queries and execute them
+        for indicator, query_source in INDICATOR_QUERIES.items():
+            process_metrics_dqa(db_source, query_source, message, indicator, db_dest)
 
-    # Iterate over the indicators queries and execute them
-    for indicator, query_source in INDICATOR_QUERIES.items():
-        process_metrics_dqa(db_source, query_source, message, indicator, db_dest)
-
-    process_duplicates_dqa(read_query_file('CheckDuplicatePatients'), db_source, message, db_dest)
-    process_check_date_created_modified(read_query_file('VisitsDateModified'), db_source, message, db_dest)
-    process_meaningful_visit(read_query_file('MeaningfulVisits'), db_source, message, db_dest)
+        process_duplicates_dqa(read_query_file('CheckDuplicatePatients'), db_source, message, db_dest)
+        process_check_date_created_modified(read_query_file('VisitsDateModified'), db_source, message, db_dest)
+        process_meaningful_visit(read_query_file('MeaningfulVisits'), db_source, message, db_dest)
     return {"message": "Processing complete"}
 
 
