@@ -1,12 +1,13 @@
 import logging
 import os
 from fastapi import APIRouter, Depends
-from sqlalchemy import text
+from sqlalchemy import text, and_
 from sqlalchemy.orm import Session
 from datetime import datetime
 
 from database import get_db_source, get_db_dest
-from models import RabbitMQMessage, DQADwapicentral, DQADwapiCentralPatientDuplicate
+from models import RabbitMQMessage, DQADwapicentral, DQADwapiCentralPatientDuplicate, \
+    DQADwapiCentralPatientVisitsCheckDateCreatedModified, DQADwapiCentralPatientMeaningfulVisits
 
 router = APIRouter()
 
@@ -25,16 +26,16 @@ INDICATOR_QUERIES = {
 
 
 # API endpoint to handle RabbitMQ messages
-@router.post("/process_dqa")
 async def process_message(message: RabbitMQMessage, db_source: Session = Depends(get_db_source),
                           db_dest: Session = Depends(get_db_dest)):
-    # Extract Docket and MFL Code from the message
 
     # Iterate over the indicators queries and execute them
     for indicator, query_source in INDICATOR_QUERIES.items():
         process_metrics_dqa(db_source, query_source, message, indicator, db_dest)
 
     process_duplicates_dqa(read_query_file('CheckDuplicatePatients'), db_source, message, db_dest)
+    process_check_date_created_modified(read_query_file('VisitsDateModified'), db_source, message, db_dest)
+    process_meaningful_visit(read_query_file('MeaningfulVisits'), db_source, message, db_dest)
     return {"message": "Processing complete"}
 
 
@@ -71,9 +72,10 @@ def process_metrics_dqa(db_source, query_source, message, indicator_name, db_des
 
 
 def process_duplicates_dqa(query, db_source, message, db_dest):
+    # sourcery skip: extract-method
+    print("Processing duplicates...")
     try:
         query_result_source = db_source.execute(text(query), {"mfl_code": message.MFL_Code}).fetchall()
-        print(query_result_source)
 
         # Extract additional information from the RabbitMQ message
         facility_name = message.Facility
@@ -81,14 +83,34 @@ def process_duplicates_dqa(query, db_source, message, db_dest):
         log_date = datetime.strptime(message.log_date, "%Y-%m-%dT%H:%M:%S.%f")
         indicator_date = datetime.strptime(message.indicator_date, "%Y-%m-%d")
 
-        dqa_dwapi_central_entry = DQADwapiCentralPatientDuplicate(
-            mfl_code=message.MFL_Code,
-            name=facility_name,
-            number_of_dups=query_value,
-            log_date=log_date,
-            reporting_date=indicator_date,
-        )
-        db_dest.add(dqa_dwapi_central_entry)
+        if (
+            existing_entry := db_dest.query(DQADwapiCentralPatientDuplicate)
+            .filter(
+                and_(
+                    DQADwapiCentralPatientDuplicate.mfl_code
+                    == message.MFL_Code,
+                    DQADwapiCentralPatientDuplicate.reporting_date
+                    == indicator_date,
+                )
+            )
+            .first()
+        ):
+            # Update existing entry
+            existing_entry.name = facility_name
+            existing_entry.number_of_dups = query_value
+            existing_entry.log_date = log_date
+            existing_entry.reporting_date = indicator_date
+        else:
+            # Insert new entry
+            new_entry = DQADwapiCentralPatientDuplicate(
+                mfl_code=message.MFL_Code,
+                name=facility_name,
+                number_of_dups=query_value,
+                log_date=log_date,
+                reporting_date=indicator_date,
+            )
+            db_dest.add(new_entry)
+
         db_dest.commit()
 
         logging.info(f"DUPS query executed successfully for {facility_name}")
@@ -96,4 +118,100 @@ def process_duplicates_dqa(query, db_source, message, db_dest):
     except Exception as e:
         # Log the error and continue to the next iteration
         logging.error(f"Error processing DUPS query '{message.Facility}': {str(e)}")
+    return
+
+
+def process_check_date_created_modified(query, db_source, message, db_dest):
+    # sourcery skip: extract-method
+    print("Processing Date Created Modified DQA...")
+    try:
+        query_result_source = db_source.execute(text(query), {"mfl_code": message.MFL_Code}).fetchall()
+
+        # Extract additional information from the RabbitMQ message
+        facility_name = message.Facility
+        query_value = str(query_result_source[0][0]) if query_result_source else 0
+        log_date = datetime.strptime(message.log_date, "%Y-%m-%dT%H:%M:%S.%f")
+        indicator_date = datetime.strptime(message.indicator_date, "%Y-%m-%d")
+
+        if (
+            existing_entry := db_dest.query(DQADwapiCentralPatientVisitsCheckDateCreatedModified)
+            .filter(
+                and_(
+                    DQADwapiCentralPatientVisitsCheckDateCreatedModified.mfl_code
+                    == message.MFL_Code,
+                    DQADwapiCentralPatientVisitsCheckDateCreatedModified.reporting_date
+                    == indicator_date,
+                )
+            )
+            .first()
+        ):
+            # Update existing entry
+            existing_entry.name = facility_name
+            existing_entry.number_anomalies = query_value
+            existing_entry.log_date = log_date
+        else:
+            # Insert new entry
+            new_entry = DQADwapiCentralPatientVisitsCheckDateCreatedModified(
+                mfl_code=message.MFL_Code,
+                name=facility_name,
+                number_anomalies=query_value,
+                log_date=log_date,
+                reporting_date=indicator_date,
+            )
+            db_dest.add(new_entry)
+
+        db_dest.commit()
+
+        logging.info(f"PV Date Created Modified query executed successfully for {facility_name}")
+    except Exception as e:
+        # Log the error and continue to the next iteration
+        logging.error(f"Error processing PV Date Created Modified query '{message.Facility}': {str(e)}")
+    return
+
+
+def process_meaningful_visit(query, db_source, message, db_dest):
+    # sourcery skip: extract-method
+    print("Processing Meaningful Visits DQA...")
+    try:
+        query_result_source = db_source.execute(text(query), {"mfl_code": message.MFL_Code}).fetchall()
+
+        # Extract additional information from the RabbitMQ message
+        facility_name = message.Facility
+        query_value = str(query_result_source[0][0]) if query_result_source else 0
+        log_date = datetime.strptime(message.log_date, "%Y-%m-%dT%H:%M:%S.%f")
+        indicator_date = datetime.strptime(message.indicator_date, "%Y-%m-%d")
+
+        if (
+            existing_entry := db_dest.query(DQADwapiCentralPatientMeaningfulVisits)
+            .filter(
+                and_(
+                    DQADwapiCentralPatientMeaningfulVisits.mfl_code
+                    == message.MFL_Code,
+                    DQADwapiCentralPatientMeaningfulVisits.reporting_date
+                    == indicator_date,
+                )
+            )
+            .first()
+        ):
+            # Update existing entry
+            existing_entry.name = facility_name
+            existing_entry.number_anomalies = query_value
+            existing_entry.log_date = log_date
+        else:
+            # Insert new entry
+            new_entry = DQADwapiCentralPatientMeaningfulVisits(
+                mfl_code=message.MFL_Code,
+                name=facility_name,
+                number_anomalies=query_value,
+                log_date=log_date,
+                reporting_date=indicator_date,
+            )
+            db_dest.add(new_entry)
+
+        db_dest.commit()
+
+        logging.info(f"PV Meaningful Visits query executed successfully for {facility_name}")
+    except Exception as e:
+        # Log the error and continue to the next iteration
+        logging.error(f"Error processing PV Meaningful Visits query '{message.Facility}': {str(e)}")
     return
